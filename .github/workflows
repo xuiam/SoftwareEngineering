@@ -1,0 +1,175 @@
+name: SSH Forward Port To Public Server
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+jobs:
+  env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set ENV
+        run: |
+          sudo apt update
+          sudo apt -y install sshpass
+          sudo passwd runner << EOD
+          root
+          root
+          EOD
+      - name: Set v2ray
+        run: |
+          mkdir v2ray
+          cd v2ray
+          wget https://github.com/v2fly/v2ray-core/releases/download/v5.0.6/v2ray-linux-64.zip
+          unzip v2ray-linux-64.zip
+          cat > config.json << EOD
+          {
+            "log": {
+              "loglevel": "info"
+            },
+            "inbounds": [
+              {
+                "port": 43456,
+                "protocol": "vmess",
+                "allocate": {
+                  "strategy": "always"
+                },
+                "settings": {
+                  "clients": [
+                    {
+                      "id": "26e3a620-e33e-45e6-b316-4570b0ecf39c",
+                      "level": 1,
+                      "alterId": 0,
+                      "email": "client@example.com"
+                    }
+                  ],
+                  "disableInsecureEncryption": true
+                },
+                "streamSettings": {
+                  "network": "ws",
+                  "wsSettings": {
+                    "connectionReuse": true,
+                    "path": "/graphql"
+                  },
+                  "security": "none",
+                  "tcpSettings": {
+                    "header": {
+                      "type": "http",
+                      "response": {
+                        "version": "1.1",
+                        "status": "200",
+                        "reason": "OK",
+                        "headers": {
+                          "Content-Type": [
+                            "application/octet-stream",
+                            "application/x-msdownload",
+                            "text/html",
+                            "application/x-shockwave-flash"
+                          ],
+                          "Transfer-Encoding": ["chunked"],
+                          "Connection": ["keep-alive"],
+                          "Pragma": "no-cache"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "outbounds": [
+              {
+                "protocol": "freedom",
+                "settings": {}
+              },
+              {
+                "protocol": "blackhole",
+                "settings": {},
+                "tag": "blocked"
+              }
+            ],
+            "routing": {
+              "domainStrategy": "AsIs",
+              "rules": [
+                {
+                  "type": "field",
+                  "ip": [
+                    "0.0.0.0/8",
+                    "10.0.0.0/8",
+                    "100.64.0.0/10",
+                    "127.0.0.0/8",
+                    "169.254.0.0/16",
+                    "172.16.0.0/12",
+                    "192.0.0.0/24",
+                    "192.0.2.0/24",
+                    "192.168.0.0/16",
+                    "198.18.0.0/15",
+                    "198.51.100.0/24",
+                    "203.0.113.0/24",
+                    "::1/128",
+                    "fc00::/7",
+                    "fe80::/10",
+                    "geoip:private"
+                  ],
+                  "outboundTag": "blocked"
+                },
+                {
+                  "type": "field",
+                  "protocol": ["bittorrent"],
+                  "outboundTag": "blocked"
+                }
+              ]
+            }
+          }
+          EOD
+          nohup ./v2ray run > v2ray.log &
+          cd ~
+      - name: Run Caddy
+        run: |
+          sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+          curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+          curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+          sudo apt update
+          sudo apt -y install caddy
+          sudo mkdir /web
+          sudo cat > ./index.html << EOD
+          <div>Hello World!</div>
+          EOD
+          sudo cat > ./Caddyfile << EOD
+          :${{ secrets.SERVER_REMOTE_PORT }} {
+            log {
+              output stdout
+            }
+            root * /web
+            reverse_proxy localhost:3456
+          }
+          auto_https off
+          EOD
+          sudo cp -a ./Caddyfile /etc/caddy/Caddyfile
+          sudo cp -a ./index.html /web/index.html
+          sudo chown root:root /etc/caddy/Caddyfile
+          cat /etc/caddy/Caddyfile
+          sudo systemctl restart caddy
+      - name: Prepare SH
+        run: |
+          echo "#!/bin/bash" >> ready.sh
+          echo "echo \"http://$SERVER_IP:$SERVER_PORT\"" >> ready.sh
+          echo "CODE=\`curl -I -m 10 -o /dev/null -s -w '%{http_code}\\n' \"http://$SERVER_IP:$SERVER_PORT\"\`" >> ready.sh
+          echo "echo \"CODE: \$CODE\"" >> ready.sh
+          echo "while [[ \"123\$CODE\" -eq \"123404\" ]]; do" >> ready.sh
+          echo "CODE=\`curl -I -m 10 -o /dev/null -s -w '%{http_code}\\n' \"http://$SERVER_IP:$SERVER_PORT\"\`" >> ready.sh
+          echo "echo \"CODE: \$CODE\"" >> ready.sh
+          echo "sleep 5" >> ready.sh
+          echo "done"  >> ready.sh
+          echo "echo \"ok\"" >> ready.sh
+          chmod +x ./ready.sh
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SERVER_PORT: ${{ secrets.SERVER_REMOTE_PORT }}
+      - name: wait
+        run: |
+          cat ./ready.sh
+          bash ./ready.sh
+      - name: Connect Server
+        run: |
+          sshpass -p ${{ secrets.SERVER_SSH_PASSWORD }} ssh -o "StrictHostKeyChecking no" -f -NT -p ${{ secrets.SERVER_SSH_PORT }} -R :${{ secrets.SERVER_REMOTE_PORT }}:localhost:${{ secrets.SERVER_REMOTE_PORT }} ${{ secrets.SERVER_SSH_USER }}@${{ secrets.SERVER_IP }}
+          sleep 1860
