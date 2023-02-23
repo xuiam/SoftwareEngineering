@@ -1,4 +1,4 @@
-name: SSH Forward Port To Public Server
+name: SSH Forward Port To Public Server Xjc
 on:
   workflow_dispatch:
   schedule:
